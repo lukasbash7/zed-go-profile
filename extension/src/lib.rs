@@ -5,7 +5,26 @@ struct GoProfileExtension {
 }
 
 impl GoProfileExtension {
-    fn ensure_binary(&mut self, _worktree: &zed::Worktree) -> zed::Result<String> {
+    fn local_binary_path(worktree: &zed::Worktree) -> Option<String> {
+        let settings = zed::settings::LspSettings::for_worktree("go-profile-lsp", worktree).ok()?;
+        let binary = settings
+            .settings
+            .as_ref()?
+            .get("binary")?
+            .get("path")?
+            .as_str()?
+            .to_string();
+        Some(binary)
+    }
+
+    fn ensure_binary(&mut self, worktree: &zed::Worktree) -> zed::Result<String> {
+        // Check for user-configured local binary path first (for development).
+        // Configure via Zed settings:
+        //   "lsp": { "go-profile-lsp": { "settings": { "binary": { "path": "/absolute/path/to/go-profile-lsp" } } } }
+        if let Some(local_path) = Self::local_binary_path(worktree) {
+            return Ok(local_path);
+        }
+
         if let Some(ref path) = self.cached_binary_path {
             if std::fs::metadata(path).is_ok() {
                 return Ok(path.clone());
@@ -34,7 +53,7 @@ impl GoProfileExtension {
         let asset_name = format!("go-profile-lsp-{arch_str}-{os_str}{ext}");
 
         let release = zed::latest_github_release(
-            "user/zed-go-profile",
+            "lukasjorg/zed-go-profile",
             zed::GithubReleaseOptions {
                 require_assets: true,
                 pre_release: false,
@@ -87,8 +106,24 @@ impl zed::Extension for GoProfileExtension {
         _language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> zed::Result<Option<zed::serde_json::Value>> {
-        let settings = zed::settings::LspSettings::for_worktree("go-profile-lsp", worktree)?;
-        Ok(settings.initialization_options)
+        let lsp_settings = zed::settings::LspSettings::for_worktree("go-profile-lsp", worktree)?;
+
+        // Prefer explicit initialization_options if set. Otherwise, forward
+        // the "settings" object (minus the "binary" key which is extension-only)
+        // so users can put all LSP config under "settings" naturally.
+        if lsp_settings.initialization_options.is_some() {
+            return Ok(lsp_settings.initialization_options);
+        }
+
+        if let Some(mut settings) = lsp_settings.settings {
+            // Remove extension-only keys before forwarding to the LSP server.
+            if let Some(obj) = settings.as_object_mut() {
+                obj.remove("binary");
+            }
+            Ok(Some(settings))
+        } else {
+            Ok(None)
+        }
     }
 }
 

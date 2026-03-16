@@ -190,10 +190,10 @@ pub fn analyze_profile(profile: &proto::Profile, max_hotspots: usize) -> Profile
                     continue;
                 }
 
-                let line_no = line.line as u64;
-                if line_no == 0 {
+                if line.line <= 0 {
                     continue;
                 }
+                let line_no = line.line as u64;
 
                 // Accumulate line costs.
                 let file_costs = line_costs.entry(filename.clone()).or_default();

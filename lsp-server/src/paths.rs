@@ -70,10 +70,12 @@ impl PathResolver {
         }
 
         // Strategy 3: Suffix match against workspace Go files.
+        // Use path-component-level matching to avoid false positives
+        // (e.g. "notmain.go" should not match "main.go").
+        let profile = Path::new(profile_path);
         for go_file in &self.go_files {
-            if profile_path.ends_with(go_file.as_str())
-                || profile_path.ends_with(&format!("/{go_file}"))
-            {
+            let go = Path::new(go_file.as_str());
+            if profile.ends_with(go) {
                 return Some(go_file.clone());
             }
         }

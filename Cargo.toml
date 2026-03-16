@@ -1,5 +1,6 @@
 [workspace]
 members = ["lsp-server"]
+exclude = ["extension"]
 resolver = "2"
-# Note: extension/ is not included because it targets wasm32-wasi
-# and has different compilation requirements.
+# Note: extension/ is excluded because it targets wasm32-wasip1
+# and has different compilation requirements. Zed compiles it separately.

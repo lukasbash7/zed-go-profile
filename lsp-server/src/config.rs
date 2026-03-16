@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::fmt;
 
 /// LSP initialization options passed from the Zed extension.
 /// All fields are optional with sensible defaults.
@@ -15,6 +16,8 @@ pub struct Config {
     pub display: DisplayConfig,
     /// Path mapping configuration.
     pub path_mapping: PathMappingConfig,
+    /// Diagnostics settings.
+    pub diagnostics: DiagnosticsConfig,
     /// Profile file poll interval in seconds.
     pub watch_interval_secs: u64,
 }
@@ -22,16 +25,13 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            profile_paths: vec![
-                ".".to_string(),
-                "./profiles".to_string(),
-                "./pprof".to_string(),
-            ],
+            profile_paths: vec![".".to_string()],
             profile_glob: "*.{pprof,prof}".to_string(),
             threshold: ThresholdConfig::default(),
             display: DisplayConfig::default(),
             path_mapping: PathMappingConfig::default(),
-            watch_interval_secs: 5,
+            diagnostics: DiagnosticsConfig::default(),
+            watch_interval_secs: 30,
         }
     }
 }
@@ -66,6 +66,8 @@ pub struct DisplayConfig {
     pub max_code_lenses: usize,
     /// Maximum number of hotspot functions tracked globally.
     pub max_hotspots: usize,
+    /// Style for severity indicators: "emoji" (colored circles) or "ascii".
+    pub hint_style: HintStyle,
 }
 
 impl Default for DisplayConfig {
@@ -75,6 +77,26 @@ impl Default for DisplayConfig {
             show_cumulative: true,
             max_code_lenses: 10,
             max_hotspots: 50,
+            hint_style: HintStyle::Emoji,
+        }
+    }
+}
+
+/// Style for severity indicator prefixes on inlay hints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HintStyle {
+    /// Colored circle emoji: 🟢 🟡 🟠 🔴
+    Emoji,
+    /// ASCII block characters: ░ ▒ ▓ █
+    Ascii,
+}
+
+impl fmt::Display for HintStyle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HintStyle::Emoji => write!(f, "emoji"),
+            HintStyle::Ascii => write!(f, "ascii"),
         }
     }
 }
@@ -88,6 +110,37 @@ pub struct PathMappingConfig {
     pub source_root: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiagnosticsConfig {
+    /// Severity level for profile diagnostics: "warning", "info", or "off".
+    pub severity: DiagnosticsSeverity,
+    /// Minimum cumulative percentage to publish a diagnostic for a line.
+    /// Lines below this threshold are omitted from the diagnostics panel.
+    pub min_percent: f64,
+}
+
+/// Controls the severity level of published diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticsSeverity {
+    /// Publish as warnings (visible in Diagnostics panel).
+    Warning,
+    /// Publish as info (visible on hover / inline only).
+    Info,
+    /// Do not publish diagnostics.
+    Off,
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            severity: DiagnosticsSeverity::Off,
+            min_percent: 1.0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,7 +148,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.profile_paths, vec![".", "./profiles", "./pprof"]);
+        assert_eq!(config.profile_paths, vec!["."]);
         assert_eq!(config.profile_glob, "*.{pprof,prof}");
         assert!((config.threshold.min_percent - 0.1).abs() < f64::EPSILON);
         assert!(config.threshold.min_flat.is_none());
@@ -103,7 +156,8 @@ mod tests {
         assert!(config.display.show_cumulative);
         assert_eq!(config.display.max_code_lenses, 10);
         assert_eq!(config.display.max_hotspots, 50);
-        assert_eq!(config.watch_interval_secs, 5);
+        assert_eq!(config.display.hint_style, HintStyle::Emoji);
+        assert_eq!(config.watch_interval_secs, 30);
     }
 
     #[test]
@@ -112,9 +166,7 @@ mod tests {
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.profile_glob, "*.pprof");
         assert_eq!(config.watch_interval_secs, 10);
-        // Defaults for unspecified fields:
-        assert_eq!(config.profile_paths, vec![".", "./profiles", "./pprof"]);
-        assert!(config.display.show_flat);
+        assert_eq!(config.profile_paths, vec!["."]);
     }
 
     #[test]
@@ -148,7 +200,22 @@ mod tests {
         let json = "{}";
         let config: Config = serde_json::from_str(json).unwrap();
         // All defaults should apply.
-        assert_eq!(config.profile_paths.len(), 3);
-        assert_eq!(config.watch_interval_secs, 5);
+        assert_eq!(config.profile_paths.len(), 1);
+        assert_eq!(config.watch_interval_secs, 30);
+        assert_eq!(config.display.hint_style, HintStyle::Emoji);
+    }
+
+    #[test]
+    fn test_deserialize_hint_style_ascii() {
+        let json = r#"{ "display": { "hintStyle": "ascii" } }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.display.hint_style, HintStyle::Ascii);
+    }
+
+    #[test]
+    fn test_deserialize_hint_style_emoji() {
+        let json = r#"{ "display": { "hintStyle": "emoji" } }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.display.hint_style, HintStyle::Emoji);
     }
 }

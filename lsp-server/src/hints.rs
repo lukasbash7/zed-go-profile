@@ -1,5 +1,5 @@
 use crate::analysis::ProfileData;
-use crate::config::Config;
+use crate::config::{Config, HintStyle};
 use crate::format::{format_percent, format_value};
 use tower_lsp::lsp_types::*;
 
@@ -34,6 +34,7 @@ pub fn generate_inlay_hints(
             data.value_unit,
             config.display.show_flat,
             config.display.show_cumulative,
+            config.display.hint_style,
         );
 
         if label.is_empty() {
@@ -89,7 +90,7 @@ fn passes_threshold(flat: i64, cumulative: i64, total: i64, config: &Config) -> 
 }
 
 /// Format the inlay hint label text.
-/// Example: "  flat: 15ms | cum: 340ms (55.1%)"
+/// Example: "  🔴 flat: 15ms | cum: 340ms (55.1%)"
 fn format_hint_label(
     flat: i64,
     cumulative: i64,
@@ -97,10 +98,11 @@ fn format_hint_label(
     unit: crate::format::ValueUnit,
     show_flat: bool,
     show_cumulative: bool,
+    hint_style: HintStyle,
 ) -> String {
     let mut parts = Vec::new();
 
-    if show_flat {
+    if show_flat && flat > 0 {
         parts.push(format!("flat: {}", format_value(flat, unit)));
     }
 
@@ -118,7 +120,48 @@ fn format_hint_label(
         return String::new();
     }
 
-    format!("  {}", parts.join(" | "))
+    let cum_pct = if total > 0 {
+        (cumulative as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let indicator = severity_indicator(cum_pct, hint_style);
+
+    format!("  {} {}", indicator, parts.join(" | "))
+}
+
+/// Return a severity indicator based on the cumulative cost percentage.
+///
+/// Boundaries:
+///   - green:  < 5%
+///   - yellow: 5% – < 15%
+///   - orange: 15% – < 30%
+///   - red:    >= 30%
+fn severity_indicator(cum_pct: f64, style: HintStyle) -> &'static str {
+    match style {
+        HintStyle::Emoji => {
+            if cum_pct >= 30.0 {
+                "🔴"
+            } else if cum_pct >= 15.0 {
+                "🟠"
+            } else if cum_pct >= 5.0 {
+                "🟡"
+            } else {
+                "🟢"
+            }
+        }
+        HintStyle::Ascii => {
+            if cum_pct >= 30.0 {
+                "█" // solid block
+            } else if cum_pct >= 15.0 {
+                "▓" // dark shade
+            } else if cum_pct >= 5.0 {
+                "▒" // medium shade
+            } else {
+                "░" // light shade
+            }
+        }
+    }
 }
 
 /// Format a detailed tooltip string.
@@ -199,6 +242,7 @@ mod tests {
                 show_cumulative: true,
                 max_code_lenses: 10,
                 max_hotspots: 50,
+                hint_style: HintStyle::Emoji,
             },
             ..Default::default()
         }
@@ -229,6 +273,10 @@ mod tests {
 
         // Verify label contains expected values
         if let InlayHintLabel::String(ref label) = hints[0].label {
+            assert!(
+                label.contains("🔴"),
+                "should have red indicator, label was: {label}"
+            );
             assert!(label.contains("flat: 50ms"), "label was: {label}");
             assert!(label.contains("cum: 340ms"), "label was: {label}");
             assert!(label.contains("(34.0%)"), "label was: {label}");
@@ -360,7 +408,77 @@ mod tests {
             ValueUnit::Nanoseconds,
             true,
             true,
+            HintStyle::Emoji,
         );
-        assert_eq!(label, "  flat: 15ms | cum: 340ms (34.0%)");
+        assert_eq!(label, "  🔴 flat: 15ms | cum: 340ms (34.0%)");
+    }
+
+    #[test]
+    fn test_format_hint_label_ascii_style() {
+        let label = format_hint_label(
+            15_000_000,    // 15ms
+            340_000_000,   // 340ms
+            1_000_000_000, // 1s total
+            ValueUnit::Nanoseconds,
+            true,
+            true,
+            HintStyle::Ascii,
+        );
+        assert_eq!(label, "  █ flat: 15ms | cum: 340ms (34.0%)");
+    }
+
+    #[test]
+    fn test_severity_indicator_emoji_tiers() {
+        assert_eq!(severity_indicator(0.5, HintStyle::Emoji), "🟢");
+        assert_eq!(severity_indicator(4.9, HintStyle::Emoji), "🟢");
+        assert_eq!(severity_indicator(5.0, HintStyle::Emoji), "🟡");
+        assert_eq!(severity_indicator(14.9, HintStyle::Emoji), "🟡");
+        assert_eq!(severity_indicator(15.0, HintStyle::Emoji), "🟠");
+        assert_eq!(severity_indicator(29.9, HintStyle::Emoji), "🟠");
+        assert_eq!(severity_indicator(30.0, HintStyle::Emoji), "🔴");
+        assert_eq!(severity_indicator(99.0, HintStyle::Emoji), "🔴");
+    }
+
+    #[test]
+    fn test_severity_indicator_ascii_tiers() {
+        assert_eq!(severity_indicator(0.5, HintStyle::Ascii), "░");
+        assert_eq!(severity_indicator(4.9, HintStyle::Ascii), "░");
+        assert_eq!(severity_indicator(5.0, HintStyle::Ascii), "▒");
+        assert_eq!(severity_indicator(14.9, HintStyle::Ascii), "▒");
+        assert_eq!(severity_indicator(15.0, HintStyle::Ascii), "▓");
+        assert_eq!(severity_indicator(29.9, HintStyle::Ascii), "▓");
+        assert_eq!(severity_indicator(30.0, HintStyle::Ascii), "█");
+        assert_eq!(severity_indicator(99.0, HintStyle::Ascii), "█");
+    }
+
+    #[test]
+    fn test_format_hint_label_hides_zero_flat() {
+        // flat=0 should be hidden even when show_flat=true
+        let label = format_hint_label(
+            0,             // 0ns flat
+            340_000_000,   // 340ms cumulative
+            1_000_000_000, // 1s total
+            ValueUnit::Nanoseconds,
+            true,
+            true,
+            HintStyle::Emoji,
+        );
+        assert_eq!(label, "  🔴 cum: 340ms (34.0%)");
+        assert!(!label.contains("flat:"));
+    }
+
+    #[test]
+    fn test_format_hint_label_shows_nonzero_flat() {
+        let label = format_hint_label(
+            15_000_000,    // 15ms flat
+            340_000_000,   // 340ms cumulative
+            1_000_000_000, // 1s total
+            ValueUnit::Nanoseconds,
+            true,
+            true,
+            HintStyle::Emoji,
+        );
+        assert!(label.contains("flat: 15ms"));
+        assert!(label.contains("cum: 340ms"));
     }
 }

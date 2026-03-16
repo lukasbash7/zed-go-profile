@@ -1,5 +1,6 @@
 use crate::analysis::{self, ProfileData};
 use crate::config::Config;
+use crate::diagnostics;
 use crate::hints;
 use crate::lenses;
 use crate::paths::PathResolver;
@@ -134,19 +135,64 @@ impl Backend {
 
     /// Notify the client to refresh inlay hints and code lenses.
     pub async fn request_refresh(&self) {
-        let state = self.state.read().await;
+        let (inlay, codelens) = {
+            let state = self.state.read().await;
+            (state.client_supports_inlay_refresh, state.client_supports_codelens_refresh)
+        };
 
-        if state.client_supports_inlay_refresh {
+        if inlay {
             if let Err(e) = self.client.inlay_hint_refresh().await {
                 tracing::warn!("inlay hint refresh failed: {e}");
             }
         }
 
-        if state.client_supports_codelens_refresh {
+        if codelens {
             if let Err(e) = self.client.code_lens_refresh().await {
                 tracing::warn!("code lens refresh failed: {e}");
             }
         }
+    }
+
+    /// Publish diagnostics for all files that have lines above the threshold.
+    /// Sends `textDocument/publishDiagnostics` for each qualifying file, and
+    /// clears diagnostics for files that previously had them but no longer do.
+    pub async fn publish_diagnostics(&self) {
+        let state = self.state.read().await;
+        if state.config.diagnostics.severity == crate::config::DiagnosticsSeverity::Off {
+            return;
+        }
+        let Some(ref data) = state.profile_data else {
+            return;
+        };
+        let Some(ref workspace_root) = state.workspace_root else {
+            return;
+        };
+
+        let config = state.config.clone();
+        let workspace_root = workspace_root.clone();
+        let file_keys = diagnostics::files_with_diagnostics(data, &config);
+
+        let mut notifications = Vec::new();
+        for file_key in &file_keys {
+            let diags = diagnostics::generate_diagnostics(data, &config, file_key);
+            let path = workspace_root.join(file_key);
+            if let Ok(uri) = Url::from_file_path(&path) {
+                notifications.push((uri, diags));
+            }
+        }
+        drop(state);
+
+        for (uri, diags) in notifications {
+            self.client
+                .publish_diagnostics(uri, diags, None)
+                .await;
+        }
+
+        tracing::info!(
+            "published diagnostics for {} files (pid={})",
+            file_keys.len(),
+            std::process::id()
+        );
     }
 
     /// Resolve a document URI to a workspace-relative file key.
@@ -174,8 +220,22 @@ impl LanguageServer for Backend {
         // Parse initialization options.
         let config: Config = params
             .initialization_options
-            .and_then(|v| serde_json::from_value(v).ok())
+            .as_ref()
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+
+        tracing::info!(
+            "init options raw (pid={}): {:?}",
+            std::process::id(),
+            params.initialization_options
+        );
+        tracing::info!(
+            "parsed config (pid={}): profile_paths={:?}, profile_glob={:?}, workspace_root={:?}",
+            std::process::id(),
+            config.profile_paths,
+            config.profile_glob,
+            workspace_root
+        );
 
         // Check client capabilities for refresh support.
         let client_supports_inlay_refresh = params
@@ -244,7 +304,15 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _params: InitializedParams) {
-        tracing::info!("go-profile-lsp initialized");
+        tracing::info!("go-profile-lsp initialized (pid={})", std::process::id());
+
+        // Profiles were loaded during initialize(). Now that the handshake is
+        // complete, ask the client to re-request inlay hints / code lenses so
+        // that any early (empty) responses are replaced with real data.
+        self.request_refresh().await;
+
+        // Push diagnostics for all qualifying files now that profile is loaded.
+        self.publish_diagnostics().await;
 
         // Start the profile file watcher as a background task.
         let state = self.state.clone();
@@ -252,25 +320,39 @@ impl LanguageServer for Backend {
 
         let watch_state = self.state.clone();
         tokio::spawn(async move {
-            let interval = {
+            let (interval, initial_files) = {
                 let s = watch_state.read().await;
-                Duration::from_secs(s.config.watch_interval_secs)
+                let interval = Duration::from_secs(s.config.watch_interval_secs);
+                let files = match &s.workspace_root {
+                    Some(root) => discover_profile_files(root, &s.config),
+                    None => Vec::new(),
+                };
+                (interval, files)
             };
 
             let mut watcher = crate::watch::FileWatcher::new();
+            // Seed with files discovered at startup to avoid spurious first reload.
+            watcher.seed(&initial_files);
 
             loop {
                 tokio::time::sleep(interval).await;
 
-                let files = {
-                    let s = watch_state.read().await;
-                    match (&s.workspace_root, &s.config) {
-                        (Some(root), config) => discover_profile_files(root, config),
-                        _ => continue,
-                    }
+                let changed = if watcher.should_rediscover() {
+                    // Expensive: full glob re-discovery to find new/removed files.
+                    let files = {
+                        let s = watch_state.read().await;
+                        match (&s.workspace_root, &s.config) {
+                            (Some(root), config) => discover_profile_files(root, config),
+                            _ => continue,
+                        }
+                    };
+                    watcher.check_for_changes(&files)
+                } else {
+                    // Cheap: only stat the already-known files.
+                    watcher.check_known_files()
                 };
 
-                if watcher.check_for_changes(&files) {
+                if changed {
                     tracing::info!("profile file changes detected, reloading");
 
                     // Re-create a temporary Backend-like context to reload.
@@ -280,28 +362,57 @@ impl LanguageServer for Backend {
                     };
                     backend.load_profiles().await;
                     backend.request_refresh().await;
+                    backend.publish_diagnostics().await;
                 }
             }
         });
+    }
+
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        tracing::info!(
+            "did_open: {} (pid={})",
+            params.text_document.uri,
+            std::process::id()
+        );
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        tracing::info!(
+            "did_close: {} (pid={})",
+            params.text_document.uri,
+            std::process::id()
+        );
     }
 
     async fn inlay_hint(
         &self,
         params: InlayHintParams,
     ) -> Result<Option<Vec<InlayHint>>> {
+        tracing::debug!("inlay_hint request for: {} (pid={})", params.text_document.uri, std::process::id());
         let state = self.state.read().await;
 
         let Some(ref data) = state.profile_data else {
+            tracing::debug!("no profile data loaded");
             return Ok(None);
         };
 
         let Some(ref workspace_root) = state.workspace_root else {
+            tracing::debug!("no workspace root");
             return Ok(None);
         };
 
         let Some(file_key) = Self::uri_to_file_key(&params.text_document.uri, workspace_root) else {
+            tracing::debug!("could not resolve URI to file key");
             return Ok(None);
         };
+
+        tracing::debug!("file_key: {}, has data: {}", file_key, data.line_costs.contains_key(&file_key));
+        tracing::debug!(
+            "requested range: {}:{} - {}:{} (pid={})",
+            params.range.start.line, params.range.start.character,
+            params.range.end.line, params.range.end.character,
+            std::process::id()
+        );
 
         // After Task 11, profile data keys are workspace-relative paths,
         // so direct lookup works.
@@ -309,7 +420,33 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
+        // Log the lines we have data for in this file
+        if let Some(file_costs) = data.line_costs.get(&file_key) {
+            let line_numbers: Vec<u64> = file_costs.keys().copied().collect();
+            tracing::debug!(
+                "file has {} lines with cost data, line numbers: {:?} (pid={})",
+                line_numbers.len(),
+                &line_numbers[..line_numbers.len().min(20)],
+                std::process::id()
+            );
+        }
+
         let hints = hints::generate_inlay_hints(data, &state.config, &file_key, &params.range);
+
+        tracing::info!(
+            "returning {} inlay hints for {} (pid={})",
+            hints.len(), file_key, std::process::id()
+        );
+
+        // Log first few hints for debugging
+        for (i, hint) in hints.iter().take(3).enumerate() {
+            if let InlayHintLabel::String(ref label) = hint.label {
+                tracing::debug!(
+                    "  hint[{}]: line={}, char={}, label={:?} (pid={})",
+                    i, hint.position.line, hint.position.character, label, std::process::id()
+                );
+            }
+        }
 
         if hints.is_empty() {
             Ok(None)
@@ -448,10 +585,65 @@ mod tests {
         std::fs::create_dir_all(root.join("profiles")).unwrap();
         std::fs::write(root.join("profiles/cpu.pprof"), b"data").unwrap();
 
+        // Default config only searches ".", so subdirectory profiles are not found.
         let config = Config::default();
         let files = discover_profile_files(root, &config);
+        assert_eq!(files.len(), 0);
 
+        // User adds "profiles" to profilePaths to find them.
+        let config = Config {
+            profile_paths: vec![".".to_string(), "./profiles".to_string()],
+            ..Config::default()
+        };
+        let files = discover_profile_files(root, &config);
         assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn test_discover_profile_files_deep_nesting_requires_explicit_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Create a deeply nested profile file.
+        std::fs::create_dir_all(root.join("cmd/server")).unwrap();
+        std::fs::write(root.join("cmd/server/cpu.pprof"), b"data").unwrap();
+        // Also one at root level.
+        std::fs::write(root.join("heap.pprof"), b"data").unwrap();
+
+        // Default config (non-recursive) should only find root-level file.
+        let config = Config::default();
+        let files = discover_profile_files(root, &config);
+        assert_eq!(files.len(), 1);
+
+        // With explicit profilePaths, deep files are found.
+        let config = Config {
+            profile_paths: vec![".".to_string(), "./cmd/server".to_string()],
+            ..Config::default()
+        };
+        let files = discover_profile_files(root, &config);
+        assert_eq!(files.len(), 2);
+        let names: Vec<&str> = files.iter().filter_map(|f| f.file_name()?.to_str()).collect();
+        assert!(names.contains(&"cpu.pprof"));
+        assert!(names.contains(&"heap.pprof"));
+    }
+
+    #[test]
+    fn test_discover_profile_files_recursive_glob_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Create a deeply nested profile file.
+        std::fs::create_dir_all(root.join("cmd/server")).unwrap();
+        std::fs::write(root.join("cmd/server/cpu.pprof"), b"data").unwrap();
+        std::fs::write(root.join("heap.pprof"), b"data").unwrap();
+
+        // User can opt in to recursive glob.
+        let config = Config {
+            profile_glob: "**/*.{pprof,prof}".to_string(),
+            ..Config::default()
+        };
+        let files = discover_profile_files(root, &config);
+        assert_eq!(files.len(), 2);
     }
 }
 
