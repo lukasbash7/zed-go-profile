@@ -49,19 +49,18 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-        working-directory: lsp-server
+        run: cargo build --release --target ${{ matrix.target }} -p go-profile-lsp
 
       - name: Rename binary (unix)
         if: runner.os != 'Windows'
         run: |
-          cp lsp-server/target/${{ matrix.target }}/release/go-profile-lsp \
+          cp target/${{ matrix.target }}/release/go-profile-lsp \
              go-profile-lsp-${{ matrix.target }}
 
       - name: Rename binary (windows)
         if: runner.os == 'Windows'
         run: |
-          cp lsp-server/target/${{ matrix.target }}/release/go-profile-lsp.exe `
+          cp target/${{ matrix.target }}/release/go-profile-lsp.exe `
              go-profile-lsp-${{ matrix.target }}.exe
 
       - name: Upload artifact
