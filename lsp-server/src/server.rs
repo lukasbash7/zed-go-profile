@@ -2,7 +2,10 @@ use crate::analysis::{self, ProfileData};
 use crate::config::Config;
 use crate::hints;
 use crate::lenses;
+use crate::paths::PathResolver;
 use crate::profile;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -85,7 +88,7 @@ impl Backend {
         match profile::parse_profile_file(profile_path) {
             Ok(raw_profile) => {
                 let max_hotspots = config.display.max_hotspots;
-                let data = analysis::analyze_profile(&raw_profile, max_hotspots);
+                let mut data = analysis::analyze_profile(&raw_profile, max_hotspots);
                 tracing::info!(
                     "loaded profile from {:?}: {} files, {} hotspots, total_value={}",
                     profile_path,
@@ -94,10 +97,34 @@ impl Backend {
                     data.total_value,
                 );
 
+                // Resolve profile paths to workspace-relative paths.
+                let mut resolver = PathResolver::new(
+                    workspace_root.clone(),
+                    config.path_mapping.clone(),
+                );
+
+                // Resolve line_costs keys.
+                let resolved_line_costs: HashMap<String, BTreeMap<u64, analysis::LineCost>> = data
+                    .line_costs
+                    .drain()
+                    .filter_map(|(profile_path, costs)| {
+                        resolver
+                            .resolve(&profile_path)
+                            .map(|resolved| (resolved, costs))
+                    })
+                    .collect();
+                data.line_costs = resolved_line_costs;
+
+                // Resolve hotspot filenames.
+                for hotspot in &mut data.hotspots {
+                    if let Some(resolved) = resolver.resolve(&hotspot.filename) {
+                        hotspot.filename = resolved;
+                    }
+                    // If unresolvable, leave original — the lens just won't match any open file.
+                }
+
                 let mut state = self.state.write().await;
                 state.profile_data = Some(data);
-                // Note: profile data keys are raw protobuf paths at this point.
-                // Path resolution is added in Task 11.
             }
             Err(e) => {
                 tracing::error!("failed to parse profile {:?}: {e}", profile_path);
