@@ -1,3 +1,4 @@
+mod analysis;
 mod config;
 mod format;
 mod profile;
