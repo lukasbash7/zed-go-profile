@@ -189,9 +189,8 @@ impl Backend {
         }
 
         tracing::info!(
-            "published diagnostics for {} files (pid={})",
-            file_keys.len(),
-            std::process::id()
+            "published diagnostics for {} files",
+            file_keys.len()
         );
     }
 
@@ -225,13 +224,7 @@ impl LanguageServer for Backend {
             .unwrap_or_default();
 
         tracing::info!(
-            "init options raw (pid={}): {:?}",
-            std::process::id(),
-            params.initialization_options
-        );
-        tracing::info!(
-            "parsed config (pid={}): profile_paths={:?}, profile_glob={:?}, workspace_root={:?}",
-            std::process::id(),
+            "config: profile_paths={:?}, profile_glob={:?}, workspace_root={:?}",
             config.profile_paths,
             config.profile_glob,
             workspace_root
@@ -304,7 +297,7 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _params: InitializedParams) {
-        tracing::info!("go-profile-lsp initialized (pid={})", std::process::id());
+        tracing::info!("go-profile-lsp initialized");
 
         // Profiles were loaded during initialize(). Now that the handshake is
         // complete, ask the client to re-request inlay hints / code lenses so
@@ -368,51 +361,23 @@ impl LanguageServer for Backend {
         });
     }
 
-    async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        tracing::info!(
-            "did_open: {} (pid={})",
-            params.text_document.uri,
-            std::process::id()
-        );
-    }
-
-    async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        tracing::info!(
-            "did_close: {} (pid={})",
-            params.text_document.uri,
-            std::process::id()
-        );
-    }
-
     async fn inlay_hint(
         &self,
         params: InlayHintParams,
     ) -> Result<Option<Vec<InlayHint>>> {
-        tracing::debug!("inlay_hint request for: {} (pid={})", params.text_document.uri, std::process::id());
         let state = self.state.read().await;
 
         let Some(ref data) = state.profile_data else {
-            tracing::debug!("no profile data loaded");
             return Ok(None);
         };
 
         let Some(ref workspace_root) = state.workspace_root else {
-            tracing::debug!("no workspace root");
             return Ok(None);
         };
 
         let Some(file_key) = Self::uri_to_file_key(&params.text_document.uri, workspace_root) else {
-            tracing::debug!("could not resolve URI to file key");
             return Ok(None);
         };
-
-        tracing::debug!("file_key: {}, has data: {}", file_key, data.line_costs.contains_key(&file_key));
-        tracing::debug!(
-            "requested range: {}:{} - {}:{} (pid={})",
-            params.range.start.line, params.range.start.character,
-            params.range.end.line, params.range.end.character,
-            std::process::id()
-        );
 
         // After Task 11, profile data keys are workspace-relative paths,
         // so direct lookup works.
@@ -420,33 +385,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        // Log the lines we have data for in this file
-        if let Some(file_costs) = data.line_costs.get(&file_key) {
-            let line_numbers: Vec<u64> = file_costs.keys().copied().collect();
-            tracing::debug!(
-                "file has {} lines with cost data, line numbers: {:?} (pid={})",
-                line_numbers.len(),
-                &line_numbers[..line_numbers.len().min(20)],
-                std::process::id()
-            );
-        }
-
         let hints = hints::generate_inlay_hints(data, &state.config, &file_key, &params.range);
-
-        tracing::info!(
-            "returning {} inlay hints for {} (pid={})",
-            hints.len(), file_key, std::process::id()
-        );
-
-        // Log first few hints for debugging
-        for (i, hint) in hints.iter().take(3).enumerate() {
-            if let InlayHintLabel::String(ref label) = hint.label {
-                tracing::debug!(
-                    "  hint[{}]: line={}, char={}, label={:?} (pid={})",
-                    i, hint.position.line, hint.position.character, label, std::process::id()
-                );
-            }
-        }
 
         if hints.is_empty() {
             Ok(None)

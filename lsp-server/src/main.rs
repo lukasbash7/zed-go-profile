@@ -14,19 +14,14 @@ use tower_lsp::{LspService, Server};
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing — write to a log file so we can inspect when running under Zed.
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/go-profile-lsp.log")
-        .expect("failed to open log file");
-
+    // Initialize tracing to stderr. Default level is `info`; override with
+    // RUST_LOG env var (e.g. RUST_LOG=go_profile_lsp=debug) for debugging.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("go_profile_lsp=debug".parse().unwrap()),
+                .add_directive("go_profile_lsp=info".parse().unwrap()),
         )
-        .with_writer(log_file)
+        .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
 

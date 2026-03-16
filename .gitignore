@@ -5,5 +5,12 @@
 target/
 *.wasm
 
+# Logs
+*.log
+
+# Profile data
+*.pprof
+*.prof
+
 # Superpowers specs/plans (local only)
 docs/superpowers/
