@@ -25,6 +25,7 @@ impl PathResolver {
 
     /// Clear cache and rescan workspace files.
     /// Call this when profile data is reloaded.
+    #[allow(dead_code)]
     pub fn invalidate(&mut self) {
         self.cache.clear();
         self.go_files = scan_go_files(&self.workspace_root);

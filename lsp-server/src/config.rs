@@ -79,22 +79,13 @@ impl Default for DisplayConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PathMappingConfig {
     /// Prefix to strip from profile file paths.
     pub trim_prefix: String,
     /// Source root to prepend after trimming.
     pub source_root: String,
-}
-
-impl Default for PathMappingConfig {
-    fn default() -> Self {
-        Self {
-            trim_prefix: String::new(),
-            source_root: String::new(),
-        }
-    }
 }
 
 #[cfg(test)]

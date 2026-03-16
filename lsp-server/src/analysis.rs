@@ -10,6 +10,7 @@ pub enum ProfileType {
     Heap,
     Allocs,
     Block,
+    #[allow(dead_code)]
     Mutex,
     Goroutine,
     Unknown,
@@ -23,6 +24,7 @@ pub struct ProfileData {
     /// Top functions ranked by cumulative cost.
     pub hotspots: Vec<HotspotFunction>,
     /// What kind of profile.
+    #[allow(dead_code)]
     pub profile_type: ProfileType,
     /// Human-readable description of the value (e.g., "cpu").
     pub sample_type_label: String,
@@ -31,6 +33,7 @@ pub struct ProfileData {
     /// Total value across all samples (for percentage calculation).
     pub total_value: i64,
     /// Profile collection duration, if available.
+    #[allow(dead_code)]
     pub duration: Option<Duration>,
 }
 
@@ -47,6 +50,7 @@ pub struct LineCost {
 #[derive(Debug, Clone)]
 pub struct HotspotFunction {
     pub rank: usize,
+    #[allow(dead_code)]
     pub name: String,
     pub filename: String,
     pub start_line: u64,

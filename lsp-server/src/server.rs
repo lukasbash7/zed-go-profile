@@ -457,7 +457,6 @@ mod tests {
 
 #[cfg(test)]
 mod integration_tests {
-    use super::*;
     use crate::profile::proto;
     use prost::Message;
 

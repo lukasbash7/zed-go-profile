@@ -79,7 +79,7 @@ fn find_first_profiled_line(data: &ProfileData, file_key: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::analysis::{HotspotFunction, LineCost, ProfileData, ProfileType};
-    use crate::config::{DisplayConfig, ThresholdConfig};
+    use crate::config::DisplayConfig;
     use crate::format::ValueUnit;
     use std::collections::{BTreeMap, HashMap};
 

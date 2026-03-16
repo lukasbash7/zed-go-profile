@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 /// Tracks file modification times to detect changes.
 pub struct FileWatcher {
@@ -55,6 +55,7 @@ impl FileWatcher {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::Duration;
 
     #[test]
     fn test_initial_check_detects_existing_files() {
@@ -74,7 +75,7 @@ mod tests {
         fs::write(&file, b"data").unwrap();
 
         let mut watcher = FileWatcher::new();
-        watcher.check_for_changes(&[file.clone()]);
+        watcher.check_for_changes(std::slice::from_ref(&file));
         // Second check: no changes.
         assert!(!watcher.check_for_changes(&[file]));
     }
@@ -87,7 +88,7 @@ mod tests {
         fs::write(&file1, b"data").unwrap();
 
         let mut watcher = FileWatcher::new();
-        watcher.check_for_changes(&[file1.clone()]);
+        watcher.check_for_changes(std::slice::from_ref(&file1));
 
         // Add a new file.
         fs::write(&file2, b"data").unwrap();
@@ -117,7 +118,7 @@ mod tests {
         fs::write(&file, b"data1").unwrap();
 
         let mut watcher = FileWatcher::new();
-        watcher.check_for_changes(&[file.clone()]);
+        watcher.check_for_changes(std::slice::from_ref(&file));
 
         // Modify the file (need to ensure mtime changes).
         std::thread::sleep(Duration::from_millis(50));
