@@ -53,7 +53,7 @@ impl GoProfileExtension {
         let asset_name = format!("go-profile-lsp-{arch_str}-{os_str}{ext}");
 
         let release = zed::latest_github_release(
-            "lukasjorg/zed-go-profile",
+            "lukasbash7/zed-go-profile",
             zed::GithubReleaseOptions {
                 require_assets: true,
                 pre_release: false,

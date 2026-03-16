@@ -2,9 +2,9 @@ id = "go-profile"
 name = "Go Profile"
 version = "0.0.1"
 schema_version = 1
-authors = ["lukasjorg"]
+authors = ["lukasbash7"]
 description = "Inline Go pprof profiling annotations via LSP inlay hints and code lenses"
-repository = "https://github.com/lukasjorg/zed-go-profile"
+repository = "https://github.com/lukasbash7/zed-go-profile"
 
 [language_servers.go-profile-lsp]
 name = "Go Profile LSP"
