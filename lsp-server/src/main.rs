@@ -6,6 +6,7 @@ mod lenses;
 mod paths;
 mod profile;
 mod server;
+mod watch;
 
 use server::Backend;
 use tower_lsp::{LspService, Server};

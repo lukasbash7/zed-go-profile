@@ -5,6 +5,7 @@ use crate::lenses;
 use crate::profile;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -217,6 +218,44 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _params: InitializedParams) {
         tracing::info!("go-profile-lsp initialized");
+
+        // Start the profile file watcher as a background task.
+        let state = self.state.clone();
+        let client = self.client.clone();
+
+        let watch_state = self.state.clone();
+        tokio::spawn(async move {
+            let interval = {
+                let s = watch_state.read().await;
+                Duration::from_secs(s.config.watch_interval_secs)
+            };
+
+            let mut watcher = crate::watch::FileWatcher::new();
+
+            loop {
+                tokio::time::sleep(interval).await;
+
+                let files = {
+                    let s = watch_state.read().await;
+                    match (&s.workspace_root, &s.config) {
+                        (Some(root), config) => discover_profile_files(root, config),
+                        _ => continue,
+                    }
+                };
+
+                if watcher.check_for_changes(&files) {
+                    tracing::info!("profile file changes detected, reloading");
+
+                    // Re-create a temporary Backend-like context to reload.
+                    let backend = Backend {
+                        client: client.clone(),
+                        state: state.clone(),
+                    };
+                    backend.load_profiles().await;
+                    backend.request_refresh().await;
+                }
+            }
+        });
     }
 
     async fn inlay_hint(
