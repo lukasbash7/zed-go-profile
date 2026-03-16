@@ -4,3 +4,6 @@
 # Build artifacts
 target/
 *.wasm
+
+# Superpowers specs/plans (local only)
+docs/superpowers/
