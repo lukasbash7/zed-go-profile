@@ -1,0 +1,5 @@
+# Worktrees
+.worktrees/
+
+# Build artifacts
+target/
