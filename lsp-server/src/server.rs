@@ -454,3 +454,147 @@ mod tests {
         assert_eq!(files.len(), 1);
     }
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::profile::proto;
+    use prost::Message;
+
+    /// Build a realistic test profile with multiple files and functions.
+    /// Uses absolute paths (like real pprof profiles do) to exercise path resolution.
+    fn make_realistic_profile() -> Vec<u8> {
+        let string_table = vec![
+            "".to_string(),            // 0
+            "cpu".to_string(),         // 1
+            "nanoseconds".to_string(), // 2
+            "/home/ci/go/src/myproject/main.go".to_string(),     // 3
+            "main".to_string(),        // 4
+            "/home/ci/go/src/myproject/pkg/handler/handler.go".to_string(), // 5
+            "HandleRequest".to_string(), // 6
+            "/home/ci/go/src/myproject/pkg/db/query.go".to_string(), // 7
+            "ExecuteQuery".to_string(),  // 8
+        ];
+
+        let functions = vec![
+            proto::Function { id: 1, name: 4, system_name: 4, filename: 3, start_line: 10 },
+            proto::Function { id: 2, name: 6, system_name: 6, filename: 5, start_line: 25 },
+            proto::Function { id: 3, name: 8, system_name: 8, filename: 7, start_line: 15 },
+        ];
+
+        let locations = vec![
+            proto::Location { id: 1, line: vec![proto::Line { function_id: 1, line: 15 }], ..Default::default() },
+            proto::Location { id: 2, line: vec![proto::Line { function_id: 2, line: 30 }], ..Default::default() },
+            proto::Location { id: 3, line: vec![proto::Line { function_id: 2, line: 35 }], ..Default::default() },
+            proto::Location { id: 4, line: vec![proto::Line { function_id: 3, line: 20 }], ..Default::default() },
+        ];
+
+        let samples = vec![
+            // Hot path: query -> handler -> main
+            proto::Sample {
+                location_id: vec![4, 2, 1],
+                value: vec![500_000_000], // 500ms
+                label: vec![],
+            },
+            // Handler doing its own work
+            proto::Sample {
+                location_id: vec![3, 1],
+                value: vec![200_000_000], // 200ms
+                label: vec![],
+            },
+            // Direct main work
+            proto::Sample {
+                location_id: vec![1],
+                value: vec![100_000_000], // 100ms
+                label: vec![],
+            },
+        ];
+
+        let profile = proto::Profile {
+            sample_type: vec![proto::ValueType { r#type: 1, unit: 2 }],
+            sample: samples,
+            location: locations,
+            function: functions,
+            string_table,
+            duration_nanos: 10_000_000_000,
+            ..Default::default()
+        };
+
+        profile.encode_to_vec()
+    }
+
+    #[test]
+    fn test_full_pipeline() {
+        // 1. Create workspace with Go files.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("pkg/handler")).unwrap();
+        std::fs::create_dir_all(root.join("pkg/db")).unwrap();
+        std::fs::write(root.join("main.go"), "package main\n\nfunc main() {\n}\n").unwrap();
+        std::fs::write(root.join("pkg/handler/handler.go"), "package handler\n").unwrap();
+        std::fs::write(root.join("pkg/db/query.go"), "package db\n").unwrap();
+
+        // 2. Write profile file.
+        let profile_bytes = make_realistic_profile();
+        std::fs::write(root.join("cpu.pprof"), &profile_bytes).unwrap();
+
+        // 3. Parse.
+        let raw = crate::profile::parse_profile(&profile_bytes).unwrap();
+
+        // 4. Analyze.
+        let mut data = crate::analysis::analyze_profile(&raw, 50);
+
+        // Verify totals.
+        assert_eq!(data.total_value, 800_000_000); // 500 + 200 + 100
+
+        // 5. Resolve paths using trim_prefix (simulating CI build paths).
+        let path_config = crate::config::PathMappingConfig {
+            trim_prefix: "/home/ci/go/src/myproject/".to_string(),
+            ..Default::default()
+        };
+        let mut resolver = crate::paths::PathResolver::new(root.to_path_buf(), path_config);
+
+        // Resolve line_costs keys.
+        let resolved: std::collections::HashMap<String, std::collections::BTreeMap<u64, crate::analysis::LineCost>> = data
+            .line_costs
+            .drain()
+            .filter_map(|(path, costs)| {
+                resolver.resolve(&path).map(|r| (r, costs))
+            })
+            .collect();
+        data.line_costs = resolved;
+
+        // Resolve hotspot filenames.
+        for h in &mut data.hotspots {
+            if let Some(r) = resolver.resolve(&h.filename) {
+                h.filename = r;
+            }
+        }
+
+        // 6. Verify resolved data.
+        assert!(data.line_costs.contains_key("main.go"), "keys: {:?}", data.line_costs.keys().collect::<Vec<_>>());
+        assert!(data.line_costs.contains_key("pkg/handler/handler.go"));
+        assert!(data.line_costs.contains_key("pkg/db/query.go"));
+
+        // 7. Generate hints.
+        let cfg = crate::config::Config::default();
+        let range = tower_lsp::lsp_types::Range {
+            start: tower_lsp::lsp_types::Position { line: 0, character: 0 },
+            end: tower_lsp::lsp_types::Position { line: 100, character: 0 },
+        };
+
+        let hints = crate::hints::generate_inlay_hints(&data, &cfg, "main.go", &range);
+        assert!(!hints.is_empty(), "expected hints for main.go");
+
+        let handler_hints = crate::hints::generate_inlay_hints(&data, &cfg, "pkg/handler/handler.go", &range);
+        assert!(!handler_hints.is_empty(), "expected hints for handler.go");
+
+        // 8. Generate code lenses.
+        let lenses = crate::lenses::generate_code_lenses(&data, &cfg, "pkg/handler/handler.go");
+        // HandleRequest should be a hotspot.
+        assert!(!lenses.is_empty(), "expected code lenses for handler.go");
+
+        let lens_title = &lenses[0].command.as_ref().unwrap().title;
+        assert!(lens_title.contains("hotspot"), "lens title: {lens_title}");
+    }
+}
