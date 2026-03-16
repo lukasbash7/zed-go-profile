@@ -167,18 +167,20 @@ for each sample in profile.samples:
 
 ### Value Column Selection
 
-The server auto-selects which value column to display based on profile type:
+The server auto-selects which value column to display by **matching `sample_type` name and unit labels** from the profile's `sample_type` array. Selection is by label match, not by hardcoded index, since different pprof producers may order columns differently.
 
-| Profile Type | Selected Column | Unit |
+Matching rules (checked in order against `sample_type[i].type` / `sample_type[i].unit`):
+
+| Profile Type | Matched Label (`type/unit`) | Unit |
 |---|---|---|
-| CPU | `cpu/nanoseconds` (index 1) | nanoseconds |
-| Heap (default) | `inuse_space/bytes` (index 3) | bytes |
-| Allocs | `alloc_space/bytes` (index 1) | bytes |
-| Block | `delay/nanoseconds` (index 1) | nanoseconds |
-| Mutex | `delay/nanoseconds` (index 1) | nanoseconds |
-| Goroutine | `goroutine/count` (index 0) | count |
+| CPU | `cpu/nanoseconds` | nanoseconds |
+| Heap (default) | `inuse_space/bytes` | bytes |
+| Allocs | `alloc_space/bytes` | bytes |
+| Block | `delay/nanoseconds` (with `contentions` also present) | nanoseconds |
+| Mutex | `delay/nanoseconds` (with `contentions` also present) | nanoseconds |
+| Goroutine | `goroutine/count` | count |
 
-Profile type is detected from `sample_type` labels. Falls back to index 0 if unrecognized.
+If no label matches, fall back to the last `sample_type` entry (index `len - 1`), which by convention is the most meaningful value. If only one `sample_type` exists, use index 0.
 
 ### Value Formatting
 
@@ -189,14 +191,22 @@ Profile type is detected from `sample_type` labels. Falls back to index 0 if unr
 
 ### File Path Resolution
 
-Profile file paths (from `Function.filename`) may not match workspace paths directly. Resolution strategy:
+Profile file paths (from `Function.filename`) may not match workspace paths directly.
+
+**Interface:** `resolve_path(profile_path: &str, workspace_root: &Path, config: &PathMappingConfig) -> Option<String>`
+
+- **Input:** A profile path string (e.g., `/home/ci/go/src/github.com/user/project/pkg/handler.go`), the workspace root directory, and the path mapping configuration (`trimPrefix`, `sourceRoot`).
+- **Output:** A resolved workspace-relative path (e.g., `pkg/handler.go`), or `None` if no match is found.
+- **Side effect:** Successful resolutions are cached in a `HashMap<String, Option<String>>` keyed by profile path.
+
+Resolution strategy (tried in order, first match wins):
 
 1. **Exact match:** Check if the profile path exists in the workspace as-is.
-2. **Configured trim:** Apply `trimPrefix` from initialization options (e.g., strip `/home/ci/go/src/`).
-3. **Suffix match:** If profile path ends with a workspace-relative path, use it. For example, profile path `github.com/user/project/pkg/handler.go` matches workspace file `pkg/handler.go`.
-4. **Configured source root:** Prepend `sourceRoot` to the stripped path.
+2. **Configured trim:** Apply `trimPrefix` from initialization options (e.g., strip `/home/ci/go/src/`), then check if the remainder exists in the workspace.
+3. **Suffix match:** Enumerate workspace `.go` files. If a workspace-relative path is a suffix of the profile path, use it. For example, profile path `github.com/user/project/pkg/handler.go` matches workspace file `pkg/handler.go`.
+4. **Configured source root:** Prepend `sourceRoot` to the trimmed path and check existence.
 
-Cache resolved paths for the lifetime of the profile data to avoid repeated filesystem lookups.
+**Cache invalidation:** The path cache is cleared whenever the profile data is reloaded (on file change detection). Workspace file list is also re-scanned at that point.
 
 ## LSP Protocol & Features
 
@@ -234,6 +244,8 @@ Tooltip: "Function: runtime.mallocgc\nFlat: 15ms (2.4%)\nCumulative: 340ms (55.1
 - Zed sends `textDocument/codeLens` with a document URI.
 - Server identifies functions in the file that appear in the top-N hotspots list.
 - Returns a code lens positioned at the function's `start_line`.
+
+**Function matching:** The server does **not** parse Go source files. Instead, it uses the `Function.start_line` value from the pprof profile data, which records where each function definition begins. The server matches a hotspot to a file by comparing the resolved `Function.filename` against the requested document URI, and positions the code lens at `Function.start_line`. This means code lenses appear only for functions that were captured in the profile — if the profile lacks `start_line` data (value 0), the lens is placed at the first profiled line of that function instead.
 
 **Lens format:**
 
@@ -284,6 +296,41 @@ All fields optional with sensible defaults.
 - On detecting a change: re-parse, rebuild cost index, send `workspace/inlayHint/refresh` and `workspace/codeLens/refresh` requests to the client.
 - File modification is detected by comparing `mtime` or file hash.
 
+**Client capability requirement:** The refresh requests (`workspace/inlayHint/refresh`, `workspace/codeLens/refresh`) are server-to-client requests that require the client to advertise `workspace.inlayHint.refreshSupport` and `workspace.codeLens.refreshSupport` capabilities during initialization. **Fallback:** If the client does not advertise refresh support, the server skips sending refresh requests. Clients will still get updated data on next `textDocument/inlayHint` or `textDocument/codeLens` request (e.g., when the user scrolls or switches files). The server logs a warning at startup if refresh is not supported.
+
+### No-Profile Behavior
+
+When the server starts and finds **no profile files** in the configured paths:
+- The server starts normally and serves empty results (no hints, no lenses).
+- It continues polling for profile files at the configured interval.
+- When a profile file appears, it is parsed and hints/lenses become available on the next request (or via refresh if supported).
+- No diagnostics or error messages are sent — absence of profiles is a normal state, not an error.
+
+### Server Capabilities
+
+The server advertises these capabilities during `initialize`:
+
+```json
+{
+  "capabilities": {
+    "inlayHintProvider": {
+      "resolveProvider": false
+    },
+    "codeLensProvider": {
+      "resolveProvider": false
+    },
+    "textDocumentSync": {
+      "openClose": true,
+      "change": 0
+    }
+  }
+}
+```
+
+- `inlayHintProvider`: serves inlay hints, no resolve step needed.
+- `codeLensProvider`: serves code lenses, no resolve step needed.
+- `textDocumentSync.openClose`: tracks which files are open (for efficient hint/lens generation). `change: 0` (None) — the server does not need file content updates since it reads profile data, not source text.
+
 ## Zed Extension (WASM Layer)
 
 ### `extension.toml`
@@ -317,16 +364,54 @@ crate-type = ["cdylib"]
 zed_extension_api = "0.7.0"
 ```
 
-### `src/lib.rs` (approximately)
+### `src/lib.rs`
+
+The extension's primary responsibility is binary management. The `ensure_binary()` method handles downloading and caching:
 
 ```rust
 use zed_extension_api as zed;
 
-struct GoProfileExtension {}
+struct GoProfileExtension {
+    cached_binary_path: Option<String>,
+}
+
+impl GoProfileExtension {
+    /// Ensure the LSP server binary is available, downloading if necessary.
+    ///
+    /// Platform detection: uses `zed::current_platform()` which returns
+    /// (Os, Architecture) — e.g., (Os::Mac, Architecture::Aarch64).
+    ///
+    /// Asset naming convention:
+    ///   go-profile-lsp-{arch}-{os}{ext}
+    /// where:
+    ///   arch = "aarch64" | "x86_64"
+    ///   os   = "apple-darwin" | "unknown-linux-gnu" | "pc-windows-msvc"
+    ///   ext  = "" (unix) | ".exe" (windows)
+    ///
+    /// Version check: the extension version in extension.toml is the expected
+    /// LSP server version. On first run or version mismatch (detected by
+    /// comparing a `.version` file next to the binary), the binary is
+    /// re-downloaded.
+    ///
+    /// Cache location: the binary is stored in the extension's work directory
+    /// (provided by the Zed runtime, not user-configurable).
+    fn ensure_binary(&mut self, worktree: &zed::Worktree) -> zed::Result<String> {
+        // 1. Construct platform-specific asset name from zed::current_platform()
+        // 2. Check if binary exists at work_dir/go-profile-lsp{ext}
+        //    and work_dir/.version matches expected version
+        // 3. If not: fetch latest GitHub release matching the extension version
+        //    using zed::latest_github_release("user/zed-go-profile", ...)
+        // 4. Find the asset matching the platform name
+        // 5. Download with zed::download_file(&asset.download_url, &binary_path, ...)
+        // 6. Write version file: work_dir/.version
+        // 7. Return binary_path
+        todo!()
+    }
+}
 
 impl zed::Extension for GoProfileExtension {
     fn new() -> Self {
-        GoProfileExtension {}
+        GoProfileExtension { cached_binary_path: None }
     }
 
     fn language_server_command(
@@ -334,7 +419,6 @@ impl zed::Extension for GoProfileExtension {
         _language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> zed::Result<zed::Command> {
-        // Download binary if not cached, return path
         let binary_path = self.ensure_binary(worktree)?;
         Ok(zed::Command {
             command: binary_path,
@@ -348,7 +432,6 @@ impl zed::Extension for GoProfileExtension {
         _language_server_id: &zed::LanguageServerId,
         _worktree: &zed::Worktree,
     ) -> zed::Result<Option<zed::serde_json::Value>> {
-        // Read from Zed LSP settings, pass through
         let settings = zed::settings::LspSettings::for_worktree("go-profile-lsp", _worktree)?;
         Ok(settings.initialization_options)
     }
@@ -364,7 +447,7 @@ name = "Go"
 path_suffixes = ["go"]
 ```
 
-This piggybacks on the existing Go language definition, allowing the LSP to attach to Go files as an additional language server.
+This declares the Go Profile LSP as an **additional** language server for Go files, alongside the existing gopls. Zed supports multiple language servers per language — each extension's `language_servers` section in `extension.toml` registers an independent server. The Go Profile LSP will not interfere with gopls because it only advertises `inlayHintProvider` and `codeLensProvider` capabilities, while gopls handles completions, diagnostics, go-to-definition, etc. Zed merges results from all active language servers for a language.
 
 ### Binary Distribution
 
